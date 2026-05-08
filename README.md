@@ -28,7 +28,7 @@ Vision Fit is an AI-powered Android application designed to help you balance phy
 ## 📦 Installation & Download
 
 ### 📥 Download APK
-Pre-built APKs are available in the **Releases** section of this repository. You can download the latest version and install it directly on your Android device.
+Pre-built APKs are available in the [Releases](https://github.com/ssc-red/VisionFit/Releases) section of this repository. You can download the latest version and install it directly on your Android device.
 
 ### 🏗 Build from Source
 1.  Clone the repository:
