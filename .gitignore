@@ -1,0 +1,44 @@
+# Built artifacts
+bin/
+gen/
+out/
+build/
+.gradle/
+.kotlin/
+
+# Android Studio / IntelliJ
+*.iml
+*.ipr
+*.iws
+.idea/
+/local.properties
+/.navigation/
+/.externalNativeBuild/
+.cxx/
+capture/
+captures/
+
+# Device-specific
+.DS_Store
+Thumbs.db
+
+# Gradle
+.gradle/
+build/
+
+# Signing files
+*.jks
+*.keystore
+*.p12
+
+# Log files
+*.log
+
+# APK/Bundle
+*.apk
+*.ap_
+*.aab
+
+# OS files
+.DS_Store
+desktop.ini

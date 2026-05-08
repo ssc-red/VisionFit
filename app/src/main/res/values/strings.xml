@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Vision Fit</string>
+    <string name="accessibility_service_description">Blocks selected apps and Reels-only screens.</string>
+</resources>
