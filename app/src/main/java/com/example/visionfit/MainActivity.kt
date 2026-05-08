@@ -62,18 +62,22 @@ import com.example.visionfit.model.AppBlockMode
 import com.example.visionfit.model.ExerciseType
 import com.example.visionfit.model.RepAlarm
 import com.example.visionfit.model.SettingsState
+import com.example.visionfit.model.GitHubRelease
 import com.example.visionfit.ui.AlarmsScreen
 import com.example.visionfit.ui.BlockedAppsScreen
 import com.example.visionfit.ui.HomeScreen
 import com.example.visionfit.ui.SettingsScreen
 import com.example.visionfit.ui.StatsScreen
+import com.example.visionfit.ui.UpdateDialog
 import com.example.visionfit.ui.WorkoutScreen
 import com.example.visionfit.ui.theme.VisionFitTheme
 import com.example.visionfit.util.isAccessibilityServiceEnabled
 import com.example.visionfit.util.isUsageAccessGranted
 import com.example.visionfit.util.loadLaunchableApps
+import com.example.visionfit.util.UpdateChecker
 import com.example.visionfit.usage.UsageTrackingService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -121,10 +125,30 @@ class MainActivity : ComponentActivity() {
                 var isBatteryOptIgnored by remember { mutableStateOf(true) }
                 
                 var activeAlarm by remember { mutableStateOf<RepAlarm?>(currentLaunchAlarm) }
+
+                // Update check state
+                var pendingUpdateRelease by remember { mutableStateOf<GitHubRelease?>(null) }
+                var hasCheckedForUpdate by remember { mutableStateOf(false) }
+
                 val lifecycleOwner = LocalLifecycleOwner.current
 
                 LaunchedEffect(settingsStore) {
                     settingsStore.ensureDailyGrantApplied()
+                }
+
+                // Check for updates once shortly after launch, but not during workout
+                val isInWorkout = activeExercise != null
+                LaunchedEffect(Unit) {
+                    if (!hasCheckedForUpdate) {
+                        delay(5000) // wait 5s after app start
+                        if (!isInWorkout) {
+                            val result = UpdateChecker.checkForUpdate(context)
+                            if (result.release != null) {
+                                pendingUpdateRelease = result.release
+                            }
+                            hasCheckedForUpdate = true
+                        }
+                    }
                 }
 
                 val apps by produceState(initialValue = emptyList()) {
@@ -377,6 +401,14 @@ class MainActivity : ComponentActivity() {
                             onOpenUsageAccessSettings = openUsageAccessSettings,
                             onOpenExactAlarmSettings = openExactAlarmSettings,
                             onOpenBatteryOptimizationSettings = openBatteryOptimizationSettings,
+                            onCheckForUpdate = {
+                                scope.launch {
+                                    val result = UpdateChecker.checkForUpdate(context)
+                                    if (result.release != null) {
+                                        pendingUpdateRelease = result.release
+                                    }
+                                }
+                            },
                             modifier = Modifier.padding(innerPadding)
                         )
                         Tab.ALARMS -> AlarmsScreen(
@@ -405,8 +437,16 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             modifier = Modifier.padding(innerPadding)
-                        )
+                    )
                     }
+                }
+
+                // Show update dialog if an update was found
+                pendingUpdateRelease?.let { release ->
+                    UpdateDialog(
+                        release = release,
+                        onDismiss = { pendingUpdateRelease = null }
+                    )
                 }
             }
         }

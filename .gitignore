@@ -39,6 +39,9 @@ build/
 *.ap_
 *.aab
 
+# Release builds
+app/release/
+
 # OS files
 .DS_Store
 desktop.ini
