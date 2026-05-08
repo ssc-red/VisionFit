@@ -129,6 +129,7 @@ class MainActivity : ComponentActivity() {
                 // Update check state
                 var pendingUpdateRelease by remember { mutableStateOf<GitHubRelease?>(null) }
                 var hasCheckedForUpdate by remember { mutableStateOf(false) }
+                var updateStatus by remember { mutableStateOf<String?>(null) }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -403,12 +404,21 @@ class MainActivity : ComponentActivity() {
                             onOpenBatteryOptimizationSettings = openBatteryOptimizationSettings,
                             onCheckForUpdate = {
                                 scope.launch {
+                                    updateStatus = "Checking..."
                                     val result = UpdateChecker.checkForUpdate(context)
                                     if (result.release != null) {
                                         pendingUpdateRelease = result.release
+                                        updateStatus = "Update available!"
+                                    } else if (result.error != null) {
+                                        updateStatus = "Could not check: ${result.error}"
+                                    } else {
+                                        val currentVersion = context.packageManager
+                                            .getPackageInfo(context.packageName, 0).versionName ?: "Unknown"
+                                        updateStatus = "Up to date (v$currentVersion)"
                                     }
                                 }
                             },
+                            updateStatus = updateStatus,
                             modifier = Modifier.padding(innerPadding)
                         )
                         Tab.ALARMS -> AlarmsScreen(
@@ -445,7 +455,10 @@ class MainActivity : ComponentActivity() {
                 pendingUpdateRelease?.let { release ->
                     UpdateDialog(
                         release = release,
-                        onDismiss = { pendingUpdateRelease = null }
+                        onDismiss = {
+                            pendingUpdateRelease = null
+                            updateStatus = null
+                        }
                     )
                 }
             }

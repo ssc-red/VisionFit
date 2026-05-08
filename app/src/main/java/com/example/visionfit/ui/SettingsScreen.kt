@@ -80,6 +80,7 @@ fun SettingsScreen(
     onOpenExactAlarmSettings: () -> Unit,
     onOpenBatteryOptimizationSettings: () -> Unit,
     onCheckForUpdate: () -> Unit,
+    updateStatus: String?,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -162,9 +163,6 @@ fun SettingsScreen(
             )
         }
 
-        item {
-            CheckForUpdateRow(onCheckForUpdate = onCheckForUpdate)
-        }
         item { SectionHeader("Credits earned per rep/second") }
         ExerciseType.entries.forEach { exercise ->
             item {
@@ -182,6 +180,12 @@ fun SettingsScreen(
                         onExerciseSecondsChange(ex, ex.defaultSecondsPerRep)
                     }
                 }
+            )
+        }
+        item {
+            CheckForUpdateRow(
+                onCheckForUpdate = onCheckForUpdate,
+                status = updateStatus
             )
         }
         item { Spacer(modifier = Modifier.height(8.dp)) }
@@ -537,61 +541,68 @@ private fun ResetDefaultsRow(onReset: () -> Unit) {
 }
 
 @Composable
-private fun CheckForUpdateRow(onCheckForUpdate: () -> Unit) {
+private fun CheckForUpdateRow(onCheckForUpdate: () -> Unit, status: String?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
+        Column {
+            Row(
                 modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.SystemUpdate,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Check for Updates",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = "Look for new releases on GitHub",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Button(
-                onClick = onCheckForUpdate,
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(text = "Check", style = MaterialTheme.typography.labelLarge)
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.SystemUpdate,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Check for Updates",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (status != null) status else "Look for new releases on GitHub",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (status?.contains("Could") == true)
+                            MaterialTheme.colorScheme.error
+                        else if (status != null)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Button(
+                    onClick = onCheckForUpdate,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "Check", style = MaterialTheme.typography.labelLarge)
+                }
             }
         }
     }
