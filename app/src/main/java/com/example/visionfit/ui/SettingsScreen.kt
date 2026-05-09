@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -62,6 +63,15 @@ import androidx.compose.ui.unit.dp
 import com.example.visionfit.model.ExerciseType
 import com.example.visionfit.model.SettingsState
 
+private data class PermissionDefinition(
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector,
+    val granted: Boolean,
+    val actionLabel: String,
+    val onAction: () -> Unit
+)
+
 @Composable
 fun SettingsScreen(
     state: SettingsState,
@@ -86,6 +96,67 @@ fun SettingsScreen(
     updateStatus: String?,
     modifier: Modifier = Modifier
 ) {
+    val permissionItems = listOf(
+        PermissionDefinition(
+            title = "Camera",
+            subtitle = "Required for live pose detection",
+            icon = Icons.Rounded.Camera,
+            granted = isCameraPermissionGranted,
+            actionLabel = if (isCameraPermissionGranted) "Granted" else "Grant",
+            onAction = onRequestCameraPermission
+        ),
+        PermissionDefinition(
+            title = "Notifications",
+            subtitle = "Show the workout tracker badge",
+            icon = Icons.Rounded.Notifications,
+            granted = isNotificationPermissionGranted,
+            actionLabel = if (isNotificationPermissionGranted) "Granted" else "Grant",
+            onAction = onRequestNotificationPermission
+        ),
+        PermissionDefinition(
+            title = "Exact Alarms",
+            subtitle = "Required to fire alarms precisely on time",
+            icon = Icons.Rounded.Update,
+            granted = isExactAlarmGranted,
+            actionLabel = if (isExactAlarmGranted) "Granted" else "Open",
+            onAction = onOpenExactAlarmSettings
+        ),
+        PermissionDefinition(
+            title = "Battery Optimization",
+            subtitle = "Prevent system from killing the alarm service",
+            icon = Icons.Rounded.BatteryAlert,
+            granted = isBatteryOptIgnored,
+            actionLabel = if (isBatteryOptIgnored) "Ignored" else "Open",
+            onAction = onOpenBatteryOptimizationSettings
+        ),
+        PermissionDefinition(
+            title = "Usage access",
+            subtitle = "Detect foreground apps and burn credits (required without Accessibility)",
+            icon = Icons.Rounded.Visibility,
+            granted = isUsageAccessGranted,
+            actionLabel = if (isUsageAccessGranted) "Granted" else "Open",
+            onAction = onOpenUsageAccessSettings
+        ),
+        PermissionDefinition(
+            title = "Display over other apps",
+            subtitle = "Show block overlay without Accessibility (grant Usage access too)",
+            icon = Icons.Rounded.Layers,
+            granted = isDrawOverlaysGranted,
+            actionLabel = if (isDrawOverlaysGranted) "Granted" else "Open",
+            onAction = onOpenDisplayOverOtherAppsSettings
+        ),
+        PermissionDefinition(
+            title = "Accessibility service",
+            subtitle = "Best experience: Reels-only mode and reliable blocking",
+            icon = Icons.Rounded.Accessibility,
+            granted = isAccessibilityServiceEnabled,
+            actionLabel = if (isAccessibilityServiceEnabled) "Enabled" else "Open",
+            onAction = onOpenAccessibilitySettings
+        )
+    )
+    val grantedPermissions = permissionItems.filter { it.granted }
+    val neededPermissions = permissionItems.filter { !it.granted }
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp),
@@ -105,74 +176,21 @@ fun SettingsScreen(
             )
         }
         item { SectionHeader("Permissions") }
-        item {
-            PermissionRow(
-                title = "Camera",
-                subtitle = "Required for live pose detection",
-                icon = Icons.Rounded.Camera,
-                granted = isCameraPermissionGranted,
-                actionLabel = if (isCameraPermissionGranted) "Granted" else "Grant",
-                onAction = onRequestCameraPermission
-            )
+        if (grantedPermissions.isNotEmpty()) {
+            item {
+                GrantedPermissionsCard(permissions = grantedPermissions)
+            }
         }
-        item {
-            PermissionRow(
-                title = "Notifications",
-                subtitle = "Show the workout tracker badge",
-                icon = Icons.Rounded.Notifications,
-                granted = isNotificationPermissionGranted,
-                actionLabel = if (isNotificationPermissionGranted) "Granted" else "Grant",
-                onAction = onRequestNotificationPermission
-            )
-        }
-        item {
-            PermissionRow(
-                title = "Exact Alarms",
-                subtitle = "Required to fire alarms precisely on time",
-                icon = Icons.Rounded.Update,
-                granted = isExactAlarmGranted,
-                actionLabel = if (isExactAlarmGranted) "Granted" else "Open",
-                onAction = onOpenExactAlarmSettings
-            )
-        }
-        item {
-            PermissionRow(
-                title = "Battery Optimization",
-                subtitle = "Prevent system from killing the alarm service",
-                icon = Icons.Rounded.BatteryAlert,
-                granted = isBatteryOptIgnored,
-                actionLabel = if (isBatteryOptIgnored) "Ignored" else "Open",
-                onAction = onOpenBatteryOptimizationSettings
-            )
-        }
-        item {
-            PermissionRow(
-                title = "Usage access",
-                subtitle = "Detect foreground apps and burn credits (required without Accessibility)",
-                icon = Icons.Rounded.Visibility,
-                granted = isUsageAccessGranted,
-                actionLabel = if (isUsageAccessGranted) "Granted" else "Open",
-                onAction = onOpenUsageAccessSettings
-            )
-        }
-        item {
-            PermissionRow(
-                title = "Display over other apps",
-                subtitle = "Show block overlay without Accessibility (grant Usage access too)",
-                icon = Icons.Rounded.Layers,
-                granted = isDrawOverlaysGranted,
-                actionLabel = if (isDrawOverlaysGranted) "Granted" else "Open",
-                onAction = onOpenDisplayOverOtherAppsSettings
-            )
-        }
-        item {
-            PermissionRow(
-                title = "Accessibility service",
-                subtitle = "Best experience: Reels-only mode and reliable blocking",
-                icon = Icons.Rounded.Accessibility,
-                granted = isAccessibilityServiceEnabled,
-                actionLabel = if (isAccessibilityServiceEnabled) "Enabled" else "Open",
-                onAction = onOpenAccessibilitySettings
+        items(
+            items = neededPermissions,
+            key = { it.title }
+        ) { p ->
+            PermissionNeededRow(
+                title = p.title,
+                subtitle = p.subtitle,
+                icon = p.icon,
+                actionLabel = p.actionLabel,
+                onAction = p.onAction
             )
         }
 
@@ -361,11 +379,77 @@ private fun DailyGrantRow(
 }
 
 @Composable
-private fun PermissionRow(
+private fun GrantedPermissionsCard(permissions: List<PermissionDefinition>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Granted",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "${permissions.size} permission${if (permissions.size == 1) "" else "s"} ready",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                permissions.forEach { p ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = p.icon,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = p.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionNeededRow(
     title: String,
     subtitle: String,
     icon: ImageVector,
-    granted: Boolean,
     actionLabel: String,
     onAction: () -> Unit
 ) {
@@ -402,7 +486,7 @@ private fun PermissionRow(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                StatusChip(granted)
+                StatusChip(granted = false)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = subtitle,
@@ -412,25 +496,20 @@ private fun PermissionRow(
             }
             Button(
                 onClick = onAction,
-                enabled = !granted || actionLabel.equals("Open", ignoreCase = true),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (granted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primary,
-                    contentColor = if (granted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
                 ),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 Text(text = actionLabel, style = MaterialTheme.typography.labelLarge)
-                if (!granted) {
-                    Spacer(modifier = Modifier.width(2.dp))
-                    Icon(
-                        imageVector = Icons.Rounded.ChevronRight,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
+                Spacer(modifier = Modifier.width(2.dp))
+                Icon(
+                    imageVector = Icons.Rounded.ChevronRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }
