@@ -5,7 +5,7 @@ Vision Fit is an AI-powered Android application designed to help you balance phy
 ## 🚀 Features
 
 -   **AI Pose Detection**: Real-time exercise tracking using Google ML Kit.
-    -   **Exercises**: Pushups, Squats, Pull Ups, Crunches, and Plank.
+    -   **Exercises**: Pushups, Squats, Pull Ups, and Plank.
 -   **App Blocking & Credit System**:
     -   Select apps to "lock" (e.g., Instagram, TikTok, YouTube).
     -   Locked apps require "credits" to stay in the foreground.

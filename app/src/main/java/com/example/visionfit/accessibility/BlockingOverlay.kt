@@ -2,7 +2,9 @@ package com.example.visionfit.accessibility
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.view.Gravity
 import android.view.View
@@ -22,6 +24,7 @@ enum class BlockingOverlayWindowType {
 class BlockingOverlay(
     private val context: Context,
     private val onExitApp: () -> Unit,
+    private val onEarnCredits: () -> Unit,
     private val windowType: BlockingOverlayWindowType = BlockingOverlayWindowType.ACCESSIBILITY
 ) {
     private val windowManager: WindowManager = requireNotNull(context.getSystemService())
@@ -93,6 +96,7 @@ class BlockingOverlay(
 
     private fun buildOverlayView(): View {
         val root = FrameLayout(context).apply {
+            // Keep the original transparent "block screen" vibe.
             setBackgroundColor(0xCC000000.toInt())
             isClickable = true
             isFocusableInTouchMode = true
@@ -108,27 +112,86 @@ class BlockingOverlay(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
-            )
+            ).apply {
+                marginStart = dp(24)
+                marginEnd = dp(24)
+            }
         }
 
         titleView = TextView(context).apply {
             textSize = 22f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_HORIZONTAL
+            setTypeface(typeface, Typeface.BOLD)
         }
         detailView = TextView(context).apply {
-            textSize = 16f
-            setTextColor(Color.WHITE)
+            textSize = 15f
+            setTextColor(0xCCFFFFFF.toInt())
             gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
         }
-        val button = Button(context).apply {
+        val spacer = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(16)
+            )
+        }
+
+        val buttonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val earnButton = Button(context).apply {
+            text = "Earn credits"
+            setOnClickListener { onEarnCredits() }
+            isAllCaps = false
+            // Lime + white has poor contrast; use app "ink" for readability.
+            setTextColor(0xFF0C0F14.toInt())
+            textSize = 16f
+            background = GradientDrawable().apply {
+                // Match app theme "lime" family (see ui/theme/Color.kt).
+                setColor(0xFFC6FF3D.toInt())
+                cornerRadius = dpF(14)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                weight = 1f
+            }
+        }
+        val homeButton = Button(context).apply {
             text = "Go home"
             setOnClickListener { onExitApp() }
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                cornerRadius = dpF(14)
+                setStroke(dp(2), 0xCCFFFFFF.toInt())
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                weight = 1f
+                marginStart = dp(10)
+            }
         }
+
+        buttonRow.addView(earnButton)
+        buttonRow.addView(homeButton)
 
         content.addView(titleView)
         content.addView(detailView)
-        content.addView(button)
+        content.addView(spacer)
+        content.addView(buttonRow)
         root.addView(content)
         return root
     }
@@ -136,5 +199,10 @@ class BlockingOverlay(
     private fun dp(value: Int): Int {
         val density = context.resources.displayMetrics.density
         return (value * density).toInt()
+    }
+
+    private fun dpF(value: Int): Float {
+        val density = context.resources.displayMetrics.density
+        return value * density
     }
 }

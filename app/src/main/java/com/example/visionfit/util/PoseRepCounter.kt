@@ -13,7 +13,6 @@ class PoseRepCounter(
 ) {
     private var stage: Stage? = null
     private var reps: Int = 0
-    private val minConfidence = 0.4f
     private var smoothedAngle: Double? = null
     private val smoothingFactor = 0.25
     private var framesInState = 0
@@ -21,14 +20,13 @@ class PoseRepCounter(
     private val recentRaw = ArrayDeque<Double>(3)
 
     private var lastRepTime = Long.MIN_VALUE / 2
-    private val repCooldownMs = 450L
+    private val defaultRepCooldownMs = 450L
     private var stageEnteredAtMs = 0L
     private var stageEntryAngle: Double? = null
     private var stageEntryRaw: Double? = null
     private var stageExtremeAngle: Double? = null
     private var stageExtremeRaw: Double? = null
     private val hysteresisMargin = 8.0
-    private val crunchHysteresisMargin = 4.0
     private val plankAngleMin = 160.0
     private val plankAngleExit = 150.0
     private val plankHoldMinMs = 3000L
@@ -53,10 +51,24 @@ class PoseRepCounter(
     private var pendingPrompt: String? = null
     private var pendingPromptFrames = 0
 
+    private var previousRepCompletionMs: Long? = null
+    private var rapidRepCueUntilMs = 0L
+    private var rapidVelocityCueUntilMs = 0L
+    private var consecutiveHighVelocityFrames = 0
+    /** Push-up completion needs the joint near full extension briefly (blocks one-frame despike counts). */
+    private var consecutivePushupNearTopFrames = 0
+
     private fun resetFormPromptState() {
         persistedFormPrompt = null
         pendingPrompt = null
         pendingPromptFrames = 0
+    }
+
+    /** Looser on upper body / trunk so front camera and partial framing still track. */
+    private fun landmarkCutoff(): Float = when (exerciseType) {
+        ExerciseType.PUSHUPS, ExerciseType.PULL_UPS -> 0.32f
+        ExerciseType.SQUATS -> 0.38f
+        ExerciseType.PLANK -> 0.34f
     }
 
     fun onPose(pose: Pose): PoseUpdate {
@@ -70,14 +82,11 @@ class PoseRepCounter(
                 angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST)
             )
             ExerciseType.SQUATS -> squatAngle(pose)
-            ExerciseType.PULL_UPS -> averageAngle(
-                angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST),
-                angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST)
-            )
-            ExerciseType.CRUNCHES -> averageAngle(
-                angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE),
-                angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE)
-            )
+            ExerciseType.PULL_UPS -> run {
+                val left = angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST)
+                val right = angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST)
+                if (left == null || right == null) null else (left + right) / 2.0
+            }
             ExerciseType.PLANK -> null
         }
 
@@ -94,6 +103,8 @@ class PoseRepCounter(
             latestPoseWasSynthetic = pose == null
             smoothedAngle = null
             recentRaw.clear()
+            consecutiveHighVelocityFrames = 0
+            consecutivePushupNearTopFrames = 0
             resetFormPromptState()
             return PoseUpdate(
                 reps = reps,
@@ -109,6 +120,7 @@ class PoseRepCounter(
         val despiked = medianOf(recentRaw)
 
         updateVelocity(despiked, nowMs)
+        trackHighVelocityMotion(nowMs)
         val angle = adaptiveSmoothedAngle(despiked, nowMs)
         val thresholds = effectiveThresholds()
         smoothedAngle = angle
@@ -116,14 +128,12 @@ class PoseRepCounter(
         maybeCollectCalibrationSample(despiked)
 
         if (stage == null) {
-            maybeEnterInitialStage(angle, despiked, thresholds, nowMs)
+            maybeEnterInitialStage(angle, despiked, thresholds, nowMs, rawAngle)
             return PoseUpdate(
                 reps = reps,
                 poseConfident = true,
                 holdActive = false,
-                formPrompt = resolveFormPrompt(
-                    formPromptSmart(pose, exerciseType, angle, stage = null)
-                ),
+                formPrompt = resolveFormPromptLayered(pose, angle, stage = null, nowMs),
                 profileSnapshot = encodedProfile()
             )
         }
@@ -132,7 +142,13 @@ class PoseRepCounter(
         when (stage!!) {
             Stage.DOWN -> {
                 updateStageExtreme(angle, despiked, thresholds)
-                if (isRepComplete(angle, thresholds, nowMs)) {
+                if (thresholds.isDownFirst && exerciseType == ExerciseType.PUSHUPS) {
+                    val clearlyExtended =
+                        extendTowardUpFirst(angle, despiked) > thresholds.up + PUSHUP_NEAR_TOP_CLEARANCE_SLOP_DEG
+                    if (clearlyExtended) consecutivePushupNearTopFrames++ else consecutivePushupNearTopFrames = 0
+                }
+                if (isRepComplete(angle, despiked, thresholds, nowMs)) {
+                    registerRepPacing(nowMs)
                     reps++
                     lastRepTime = nowMs
                     enterStage(Stage.UP, angle, despiked, nowMs)
@@ -142,11 +158,15 @@ class PoseRepCounter(
             Stage.UP -> {
                 updateStageExtreme(angle, despiked, thresholds)
                 if (thresholds.isDownFirst) {
-                    if (angle <= thresholds.down - thresholds.hysteresis && framesInState >= requiredFrames) {
+                    if (flexTowardDownFirst(angle, despiked) <= thresholds.down - thresholds.hysteresis &&
+                        framesInState >= effectiveRequiredFrames()
+                    ) {
                         enterStage(Stage.DOWN, angle, despiked, nowMs)
                     }
                 } else {
-                    if (angle >= thresholds.down + thresholds.hysteresis && framesInState >= requiredFrames) {
+                    if (extendTowardUpFirst(angle, despiked) >= thresholds.down + thresholds.hysteresis &&
+                        framesInState >= effectiveRequiredFrames()
+                    ) {
                         enterStage(Stage.DOWN, angle, despiked, nowMs)
                     }
                 }
@@ -157,9 +177,7 @@ class PoseRepCounter(
             reps = reps,
             poseConfident = true,
             holdActive = false,
-            formPrompt = resolveFormPrompt(
-                formPromptSmart(pose, exerciseType, angle, stage = stage)
-            ),
+            formPrompt = resolveFormPromptLayered(pose, angle, stage, nowMs),
             profileSnapshot = encodedProfile()
         )
     }
@@ -175,7 +193,7 @@ class PoseRepCounter(
                 reps = reps,
                 poseConfident = false,
                 holdActive = false,
-                formPrompt = "Turn sideways—show shoulder, hip, and feet in one view.",
+                formPrompt = "Step back—keep shoulders, hips, and feet or knees in frame (side or front).",
                 profileSnapshot = encodedProfile()
             )
         }
@@ -231,7 +249,28 @@ class PoseRepCounter(
         )
     }
 
-    private fun resolveFormPrompt(instant: String?): String? {
+    /** Coverage/asymmetry stay ahead of pacing cues; rapid cues skip the long stability debounce. */
+    private fun resolveFormPromptLayered(pose: Pose?, angle: Double?, stage: Stage?, nowMs: Long): String? {
+        val resolvedAngle = angle ?: return resolveFormPrompt(formPromptSmart(pose, exerciseType, angle, stage))
+        frontViewCoverageCue(pose, exerciseType)?.let { return resolveFormPrompt(it) }
+        postureAsymmetry(pose, exerciseType)?.let { return resolveFormPrompt(it) }
+        val rapid = rapidMovementFormCue(nowMs)
+        val coaching = rapid ?: formPromptCoachingCue(exerciseType, resolvedAngle, stage)
+        return resolveFormPrompt(coaching, immediateSwitch = rapid != null)
+    }
+
+    private fun formPromptCoachingCue(exercise: ExerciseType, resolvedAngle: Double, stage: Stage?): String? {
+        val nuanced = stageRefinedCue(exercise, resolvedAngle, stage)
+        return nuanced ?: baselineAngleCue(exercise, resolvedAngle)
+    }
+
+    private fun resolveFormPrompt(instant: String?, immediateSwitch: Boolean = false): String? {
+        if (immediateSwitch && instant != null) {
+            persistedFormPrompt = instant
+            pendingPrompt = instant
+            pendingPromptFrames = FORM_PROMPT_STABLE_FRAMES
+            return instant
+        }
         if (persistedFormPrompt == null && instant != null) {
             persistedFormPrompt = instant
             pendingPrompt = instant
@@ -272,11 +311,69 @@ class PoseRepCounter(
                 val resolvedAngle = angle ?: return null
                 frontViewCoverageCue(pose, exercise)?.let { return it }
                 postureAsymmetry(pose, exercise)?.let { return it }
-                val nuanced = stageRefinedCue(exercise, resolvedAngle, stage)
-                if (nuanced != null) return nuanced
-                return baselineAngleCue(exercise, resolvedAngle)
+                return formPromptCoachingCue(exercise, resolvedAngle, stage)
             }
         }
+    }
+
+    private fun registerRepPacing(nowMs: Long) {
+        if (exerciseType == ExerciseType.PLANK) return
+        val interval = previousRepCompletionMs?.let { prev -> nowMs - prev }
+        previousRepCompletionMs = nowMs
+        if (interval != null && interval < rapidRepIntervalThresholdMs()) {
+            rapidRepCueUntilMs = nowMs + RAPID_REP_CUE_DURATION_MS
+        }
+    }
+
+    private fun rapidRepIntervalThresholdMs(): Long = when (exerciseType) {
+        ExerciseType.PUSHUPS -> 360L
+        ExerciseType.PULL_UPS -> 440L
+        ExerciseType.SQUATS -> 400L
+        ExerciseType.PLANK -> Long.MAX_VALUE
+    }
+
+    private fun trackHighVelocityMotion(nowMs: Long) {
+        if (exerciseType == ExerciseType.PLANK) return
+        val threshold = rapidAngularVelocityThresholdDegPerSec()
+        if (abs(latestAngularVelocity) >= threshold) {
+            consecutiveHighVelocityFrames++
+            if (consecutiveHighVelocityFrames >= HIGH_VELOCITY_MIN_FRAMES) {
+                rapidVelocityCueUntilMs = nowMs + RAPID_VELOCITY_CUE_DURATION_MS
+            }
+        } else {
+            consecutiveHighVelocityFrames = 0
+        }
+    }
+
+    private fun rapidAngularVelocityThresholdDegPerSec(): Double = when (exerciseType) {
+        ExerciseType.PUSHUPS, ExerciseType.PULL_UPS -> 820.0
+        ExerciseType.SQUATS -> 720.0
+        ExerciseType.PLANK -> Double.MAX_VALUE
+    }
+
+    private fun rapidMovementFormCue(nowMs: Long): String? {
+        if (exerciseType == ExerciseType.PLANK) return null
+        if (nowMs <= rapidRepCueUntilMs) return rapidRepPacingMessage()
+        if (nowMs <= rapidVelocityCueUntilMs) return rapidVelocityMessage()
+        return null
+    }
+
+    private fun rapidRepPacingMessage(): String = when (exerciseType) {
+        ExerciseType.PUSHUPS ->
+            "That pace is extremely fast—slow reps so ribs stay braced and wrists stay under shoulders."
+        ExerciseType.PULL_UPS ->
+            "You're rushing reps—pause briefly at the hang and pull without kicking or kipping."
+        ExerciseType.SQUATS ->
+            "Ease the tempo—sit evenly into your hips before standing each rep."
+        ExerciseType.PLANK -> ""
+    }
+
+    private fun rapidVelocityMessage(): String = when (exerciseType) {
+        ExerciseType.PUSHUPS, ExerciseType.PULL_UPS ->
+            "Control the movement—smooth elbows through the range instead of snapping."
+        ExerciseType.SQUATS ->
+            "Dial back speed—track knees over toes through the whole squat."
+        ExerciseType.PLANK -> ""
     }
 
     private fun frontViewCoverageCue(pose: Pose?, exercise: ExerciseType): String? {
@@ -286,14 +383,22 @@ class PoseRepCounter(
                 listOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.LEFT_ELBOW, PoseLandmark.RIGHT_ELBOW, PoseLandmark.LEFT_WRIST, PoseLandmark.RIGHT_WRIST)
             ExerciseType.SQUATS ->
                 listOf(PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP, PoseLandmark.LEFT_KNEE, PoseLandmark.RIGHT_KNEE, PoseLandmark.LEFT_ANKLE, PoseLandmark.RIGHT_ANKLE)
-            ExerciseType.CRUNCHES ->
-                listOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP, PoseLandmark.LEFT_KNEE, PoseLandmark.RIGHT_KNEE)
             ExerciseType.PLANK -> emptyList()
         }
         if (ids.isEmpty()) return null
         val coverage = landmarkCoverage(pose, ids)
-        return if (coverage < 0.48f) {
-            "Phone is too front-facing for full tracking—step back and keep both sides visible."
+        val minCoverage = when (exercise) {
+            ExerciseType.PUSHUPS, ExerciseType.PULL_UPS -> 0.36f
+            ExerciseType.SQUATS -> 0.42f
+            ExerciseType.PLANK -> 0.48f
+        }
+        return if (coverage < minCoverage) {
+            when (exercise) {
+                ExerciseType.PUSHUPS, ExerciseType.PULL_UPS ->
+                    "Show shoulders and arms—step back; legs can be off-screen."
+                else ->
+                    "Phone is too front-facing for full tracking—step back and keep both sides visible."
+            }
         } else null
     }
 
@@ -302,7 +407,6 @@ class PoseRepCounter(
         return when (exercise) {
             ExerciseType.PUSHUPS, ExerciseType.PULL_UPS -> elbowAsymmetryCue(pose)
             ExerciseType.SQUATS -> kneeAsymmetryCue(pose)
-            ExerciseType.CRUNCHES -> crunchTorsoAsymmetryCue(pose)
             ExerciseType.PLANK -> null
         }
     }
@@ -329,18 +433,6 @@ class PoseRepCounter(
             lk <= rk - 5.0 -> "Left knee is deeper—spread weight evenly foot-to-foot."
             rk <= lk - 5.0 -> "Right knee is deeper—spread weight evenly foot-to-foot."
             else -> "Hips drifting—squat symmetrically facing the camera."
-        }
-    }
-
-    private fun crunchTorsoAsymmetryCue(pose: Pose): String? {
-        val lt = angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE)
-        val rt = angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE)
-        if (lt == null || rt == null) return null
-        if (abs(lt - rt) < CRUNCH_ASYMMETRY_DEG) return null
-        return when {
-            lt <= rt - 5.0 -> "Left shoulder leads—curl both sides evenly toward midline."
-            rt <= lt - 5.0 -> "Right shoulder leads—curl both sides evenly toward midline."
-            else -> "Twisting slightly—glue ribs down symmetrically."
         }
     }
 
@@ -388,16 +480,6 @@ class PoseRepCounter(
                     else -> null
                 }
             }
-            ExerciseType.CRUNCHES -> when (stage) {
-                Stage.DOWN -> when {
-                    angle > 135.0 -> "Long torso on the floor—engage abs before curling."
-                    else -> null
-                }
-                Stage.UP -> when {
-                    angle < 115.0 && angle > 90.0 -> "Peak curl—exhale ribs down; chin floats off chest."
-                    else -> null
-                }
-            }
             ExerciseType.PLANK -> null
         }
     }
@@ -418,11 +500,6 @@ class PoseRepCounter(
             angle < 60.0 -> "Lower with long arms—no swing, traps stay settled."
             else -> null
         }
-        ExerciseType.CRUNCHES -> when {
-            angle > 140.0 -> "Lift shoulder blades slightly—breath out as you shorten."
-            angle < 80.0 -> "Ease torso down ribs-to-hips relaxed; chin soft."
-            else -> null
-        }
         ExerciseType.PLANK -> null
     }
 
@@ -440,16 +517,89 @@ class PoseRepCounter(
         return sorted[sorted.size / 2]
     }
 
-    private fun angleForSide(pose: Pose, first: Int, mid: Int, last: Int): Double? {
+    private fun angleForSide(
+        pose: Pose,
+        first: Int,
+        mid: Int,
+        last: Int,
+        cutoff: Float = landmarkCutoff()
+    ): Double? {
         val f = pose.getPoseLandmark(first) ?: return null
         val m = pose.getPoseLandmark(mid) ?: return null
         val l = pose.getPoseLandmark(last) ?: return null
-        if (f.inFrameLikelihood < minConfidence || m.inFrameLikelihood < minConfidence || l.inFrameLikelihood < minConfidence) return null
+        if (f.inFrameLikelihood < cutoff || m.inFrameLikelihood < cutoff || l.inFrameLikelihood < cutoff) return null
         return angleDegrees2D(f.position3D, m.position3D, l.position3D)
     }
 
-    private fun angleDegrees2D(a: PointF3D, b: PointF3D, c: PointF3D): Double {
-        val radians = atan2((c.y - b.y).toDouble(), (c.x - b.x).toDouble()) - atan2((a.y - b.y).toDouble(), (a.x - b.x).toDouble())
+    private fun midpointLandmarkXY(pose: Pose, leftId: Int, rightId: Int, cutoff: Float): Triple<Float, Float, Float>? {
+        val l = pose.getPoseLandmark(leftId) ?: return null
+        val r = pose.getPoseLandmark(rightId) ?: return null
+        if (l.inFrameLikelihood < cutoff || r.inFrameLikelihood < cutoff) return null
+        val lp = l.position3D
+        val rp = r.position3D
+        return Triple(
+            (lp.x + rp.x) / 2f,
+            (lp.y + rp.y) / 2f,
+            (lp.z + rp.z) / 2f
+        )
+    }
+
+    private fun isLikelyFrontPlankOrientation(pose: Pose): Boolean {
+        val ls = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER) ?: return false
+        val rs = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER) ?: return false
+        val lh = pose.getPoseLandmark(PoseLandmark.LEFT_HIP) ?: return false
+        val rh = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP) ?: return false
+        val c = landmarkCutoff()
+        if (ls.inFrameLikelihood < c || rs.inFrameLikelihood < c || lh.inFrameLikelihood < c || rh.inFrameLikelihood < c) {
+            return false
+        }
+        val shoulderSpan = abs(ls.position.x - rs.position.x)
+        val hipSpan = abs(lh.position.x - rh.position.x)
+        val torsoH = abs((ls.position.y + rs.position.y) / 2f - (lh.position.y + rh.position.y) / 2f).coerceAtLeast(1f)
+        return shoulderSpan > torsoH * 0.72f && hipSpan > torsoH * 0.45f
+    }
+
+    private fun plankMidlineHipAngle(pose: Pose): Double? {
+        val c = landmarkCutoff()
+        val s = midpointLandmarkXY(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER, c) ?: return null
+        val h = midpointLandmarkXY(pose, PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP, c) ?: return null
+        val foot = midpointLandmarkXY(pose, PoseLandmark.LEFT_ANKLE, PoseLandmark.RIGHT_ANKLE, c)
+            ?: midpointLandmarkXY(pose, PoseLandmark.LEFT_KNEE, PoseLandmark.RIGHT_KNEE, c) ?: return null
+        return angleAtPoints(
+            s.first.toDouble(), s.second.toDouble(),
+            h.first.toDouble(), h.second.toDouble(),
+            foot.first.toDouble(), foot.second.toDouble()
+        )
+    }
+
+    private fun minSignedCompletionVelocity(): Double = when (exerciseType) {
+        ExerciseType.PUSHUPS -> 2.0
+        ExerciseType.PULL_UPS -> 4.2
+        ExerciseType.SQUATS -> 4.0
+        else -> MIN_SIGNED_COMPLETION_VELOCITY
+    }
+
+    private fun slowRepSpanSlop(): Double = when (exerciseType) {
+        ExerciseType.PUSHUPS -> 6.0
+        ExerciseType.PULL_UPS -> 7.0
+        ExerciseType.SQUATS -> 8.0
+        else -> SLOW_REP_SPAN_SLOP
+    }
+
+    private fun slowRepMinFrames(): Int = when (exerciseType) {
+        ExerciseType.PUSHUPS, ExerciseType.PULL_UPS -> 4
+        else -> SLOW_REP_MIN_FRAMES
+    }
+
+    private fun angleDegrees2D(a: PointF3D, b: PointF3D, c: PointF3D): Double =
+        angleAtPoints(
+            a.x.toDouble(), a.y.toDouble(),
+            b.x.toDouble(), b.y.toDouble(),
+            c.x.toDouble(), c.y.toDouble()
+        )
+
+    private fun angleAtPoints(ax: Double, ay: Double, bx: Double, by: Double, cx: Double, cy: Double): Double {
+        val radians = atan2(cy - by, cx - bx) - atan2(ay - by, ax - bx)
         var angle = abs(radians * 180.0 / Math.PI)
         if (angle > 180.0) angle = 360.0 - angle
         return angle
@@ -461,26 +611,36 @@ class PoseRepCounter(
     }
 
     private fun thresholdsFor(exercise: ExerciseType) = when (exercise) {
-        ExerciseType.PUSHUPS -> Thresholds(down = 95.0, up = 145.0, isDownFirst = true, minRepSpan = 35.0, minStageDurationMs = 200L, hysteresis = hysteresisMargin)
-        ExerciseType.SQUATS -> Thresholds(down = 105.0, up = 155.0, isDownFirst = true, minRepSpan = 35.0, minStageDurationMs = 200L, hysteresis = hysteresisMargin)
-        ExerciseType.PULL_UPS -> Thresholds(down = 150.0, up = 90.0, isDownFirst = false, minRepSpan = 35.0, minStageDurationMs = 200L, hysteresis = hysteresisMargin)
-        ExerciseType.CRUNCHES -> Thresholds(down = 140.0, up = 110.0, isDownFirst = false, minRepSpan = 20.0, minStageDurationMs = 150L, hysteresis = crunchHysteresisMargin)
+        ExerciseType.PUSHUPS -> Thresholds(down = 100.0, up = 130.0, isDownFirst = true, minRepSpan = 22.0, minStageDurationMs = 40L, hysteresis = hysteresisMargin)
+        // Shallower "bottom" (larger knee angle) so parallel depth is not required.
+        ExerciseType.SQUATS -> Thresholds(down = 118.0, up = 152.0, isDownFirst = true, minRepSpan = 26.0, minStageDurationMs = 180L, hysteresis = hysteresisMargin)
+        // Pull-ups can jitter a lot when one arm is occluded; require more ROM and time-in-stage.
+        // Note: "straight arms" on camera often reads ~125-140°, so keep [down] forgiving.
+        ExerciseType.PULL_UPS -> Thresholds(down = 128.0, up = 100.0, isDownFirst = false, minRepSpan = 26.0, minStageDurationMs = 180L, hysteresis = 8.0)
         ExerciseType.PLANK -> Thresholds(down = plankAngleMin, up = plankAngleMin, isDownFirst = true, minRepSpan = 0.0, minStageDurationMs = 0L, hysteresis = 0.0)
     }
 
-    private fun maybeEnterInitialStage(angle: Double, despiked: Double, thresholds: Thresholds, nowMs: Long) {
+    /** Uses raw estimate when smoothed hasn't caught up yet (continuous reps). */
+    private fun maybeEnterInitialStage(angle: Double, despiked: Double, thresholds: Thresholds, nowMs: Long, rawEstimate: Double?) {
+        val rawish = rawEstimate ?: despiked
+        val flex = minOf(angle, despiked, rawish)
+        val ext = maxOf(angle, despiked, rawish)
         if (thresholds.isDownFirst) {
             when {
-                angle <= thresholds.down -> enterStage(Stage.DOWN, angle, despiked, nowMs)
-                angle >= thresholds.up -> enterStage(Stage.UP, angle, despiked, nowMs)
+                flex <= thresholds.down -> enterStage(Stage.DOWN, angle, despiked, nowMs)
+                ext >= thresholds.up -> enterStage(Stage.UP, angle, despiked, nowMs)
             }
         } else {
             when {
-                angle >= thresholds.down -> enterStage(Stage.DOWN, angle, despiked, nowMs)
-                angle <= thresholds.up -> enterStage(Stage.UP, angle, despiked, nowMs)
+                ext >= thresholds.down -> enterStage(Stage.DOWN, angle, despiked, nowMs)
+                flex <= thresholds.up -> enterStage(Stage.UP, angle, despiked, nowMs)
             }
         }
     }
+
+    private fun flexTowardDownFirst(smoothed: Double, raw: Double) = minOf(smoothed, raw)
+    private fun flexTowardUpFirst(smoothed: Double, raw: Double) = minOf(smoothed, raw)
+    private fun extendTowardUpFirst(smoothed: Double, raw: Double) = maxOf(smoothed, raw)
 
     private fun updateStageExtreme(angle: Double, despiked: Double, thresholds: Thresholds) {
         val current = stageExtremeAngle ?: angle
@@ -501,10 +661,9 @@ class PoseRepCounter(
         }
     }
 
-    private fun isRepComplete(angle: Double, thresholds: Thresholds, nowMs: Long): Boolean {
-        if (nowMs - lastRepTime <= repCooldownMs) return false
-        if (framesInState < requiredFrames) return false
-        if (nowMs - stageEnteredAtMs < thresholds.minStageDurationMs) return false
+    private fun isRepComplete(angle: Double, despiked: Double, thresholds: Thresholds, nowMs: Long): Boolean {
+        if (nowMs - lastRepTime <= effectiveRepCooldownMs()) return false
+        if (framesInState < effectiveRequiredFrames()) return false
 
         val entryRaw = stageEntryRaw ?: return false
         val extremeRaw = stageExtremeRaw ?: return false
@@ -514,22 +673,90 @@ class PoseRepCounter(
             entryRaw - extremeRaw
         }
 
-        val completionVelocityOk = if (thresholds.isDownFirst) {
-            latestAngularVelocity >= MIN_SIGNED_COMPLETION_VELOCITY
-        } else {
-            latestAngularVelocity <= -MIN_SIGNED_COMPLETION_VELOCITY
-        }
-        val slowDeepRep = span >= thresholds.minRepSpan + SLOW_REP_SPAN_SLOP &&
-            framesInState >= SLOW_REP_MIN_FRAMES
-        if (!latestPoseWasSynthetic && !completionVelocityOk && !slowDeepRep) return false
+        val stageMs = nowMs - stageEnteredAtMs
+        val romExplosiveBypass = explosiveStrongRomBypass(thresholds, span)
+        if (stageMs < thresholds.minStageDurationMs && !romExplosiveBypass) return false
 
-        return span >= thresholds.minRepSpan && when {
-            thresholds.isDownFirst -> angle >= thresholds.up
-            else -> angle <= thresholds.up
+        val velocityGateActive = velocityGateApplies()
+        val velCut = minSignedCompletionVelocity()
+        val completionVelocityOk = if (thresholds.isDownFirst) {
+            latestAngularVelocity >= velCut
+        } else {
+            latestAngularVelocity <= -velCut
+        }
+        val slowDeepRep = span >= thresholds.minRepSpan + slowRepSpanSlop() &&
+            framesInState >= slowRepMinFrames()
+        if (exerciseType == ExerciseType.PUSHUPS &&
+            thresholds.isDownFirst &&
+            consecutivePushupNearTopFrames < PUSHUP_NEAR_TOP_FRAMES_REQUIRED
+        ) {
+            return false
+        }
+
+        val turnaroundBypass = explosiveTurnaroundBypass(thresholds, span, angle, despiked)
+        if (velocityGateActive &&
+            !latestPoseWasSynthetic &&
+            !completionVelocityOk &&
+            !slowDeepRep &&
+            !turnaroundBypass
+        ) {
+            return false
+        }
+
+        val atTarget = when {
+            thresholds.isDownFirst -> extendTowardUpFirst(angle, despiked) >= thresholds.up
+            else -> flexTowardUpFirst(angle, despiked) <= thresholds.up
+        }
+        return span >= thresholds.minRepSpan && atTarget
+    }
+
+    private fun velocityGateApplies(): Boolean = true
+
+    /** Short cooldown so fast push-ups are not capped at ~2 Hz. */
+    private fun effectiveRepCooldownMs(): Long = when (exerciseType) {
+        ExerciseType.PUSHUPS -> 180L
+        ExerciseType.PULL_UPS -> 420L
+        else -> defaultRepCooldownMs
+    }
+
+    private fun effectiveRequiredFrames(): Int = when (exerciseType) {
+        ExerciseType.PUSHUPS -> 2
+        else -> requiredFrames
+    }
+
+    /** Fast full-ROM rep may hit velocity ~0 at the top/bottom turn; smoothed angle can lag brief peaks. */
+    private fun explosiveTurnaroundBypass(thresholds: Thresholds, span: Double, angle: Double, despiked: Double): Boolean {
+        if (framesInState < effectiveRequiredFrames()) return false
+        val minRom = thresholds.minRepSpan * 1.28
+        return when (exerciseType) {
+            ExerciseType.PUSHUPS ->
+                thresholds.isDownFirst &&
+                    span >= minRom &&
+                    extendTowardUpFirst(angle, despiked) >= thresholds.up &&
+                    latestAngularVelocity >= PUSHUP_TURNAROUND_MIN_VEL
+            ExerciseType.PULL_UPS ->
+                !thresholds.isDownFirst &&
+                    span >= minRom &&
+                    flexTowardUpFirst(angle, despiked) <= thresholds.up
+            else -> false
+        }
+    }
+
+    /** Allows completing phase faster than minStageDurationMs only on very large ROM (not shallow spikes). */
+    private fun explosiveStrongRomBypass(thresholds: Thresholds, span: Double): Boolean {
+        return when (exerciseType) {
+            ExerciseType.PUSHUPS ->
+                thresholds.isDownFirst && span >= thresholds.minRepSpan * 1.35
+            ExerciseType.PULL_UPS ->
+                !thresholds.isDownFirst && span >= thresholds.minRepSpan * 1.48
+            else -> false
         }
     }
 
     private fun enterStage(newStage: Stage, angle: Double, despiked: Double, nowMs: Long) {
+        if (newStage == Stage.DOWN && exerciseType == ExerciseType.PUSHUPS) {
+            consecutivePushupNearTopFrames = 0
+        }
         stage = newStage
         framesInState = 1
         stageEnteredAtMs = nowMs
@@ -552,6 +779,8 @@ class PoseRepCounter(
     }
 
     private fun plankPoseConfident(pose: Pose): Boolean {
+        val c = landmarkCutoff()
+        if (plankMidlineSupportPresent(pose, c)) return true
         val leftTorso = hasLandmark(pose, PoseLandmark.LEFT_SHOULDER) && hasLandmark(pose, PoseLandmark.LEFT_HIP)
         val rightTorso = hasLandmark(pose, PoseLandmark.RIGHT_SHOULDER) && hasLandmark(pose, PoseLandmark.RIGHT_HIP)
         val leftArm = hasLandmark(pose, PoseLandmark.LEFT_ELBOW) || hasLandmark(pose, PoseLandmark.LEFT_WRIST)
@@ -559,22 +788,40 @@ class PoseRepCounter(
         return (leftTorso && leftArm) || (rightTorso && rightArm)
     }
 
+    /** Front-facing plank: both sides of torso + feet/knees + some arm support visible. */
+    private fun plankMidlineSupportPresent(pose: Pose, c: Float): Boolean {
+        fun ok(id: Int) = (pose.getPoseLandmark(id)?.inFrameLikelihood ?: 0f) >= c
+        val torso = ok(PoseLandmark.LEFT_SHOULDER) && ok(PoseLandmark.RIGHT_SHOULDER) &&
+            ok(PoseLandmark.LEFT_HIP) && ok(PoseLandmark.RIGHT_HIP)
+        if (!torso) return false
+        val lower = (ok(PoseLandmark.LEFT_ANKLE) && ok(PoseLandmark.RIGHT_ANKLE)) ||
+            (ok(PoseLandmark.LEFT_KNEE) && ok(PoseLandmark.RIGHT_KNEE))
+        val arms = ok(PoseLandmark.LEFT_WRIST) || ok(PoseLandmark.RIGHT_WRIST) ||
+            ok(PoseLandmark.LEFT_ELBOW) || ok(PoseLandmark.RIGHT_ELBOW)
+        return lower && arms
+    }
+
     private fun hasLandmark(pose: Pose, landmarkType: Int): Boolean {
         val landmark = pose.getPoseLandmark(landmarkType) ?: return false
-        return landmark.inFrameLikelihood >= minConfidence
+        return landmark.inFrameLikelihood >= landmarkCutoff()
     }
 
     private fun plankAngle(pose: Pose): Double? {
+        val midline = plankMidlineHipAngle(pose)
         val left = angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE)
         val right = angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE)
-        val fromKnee = averageAngle(left, right)
-        if (fromKnee != null) return fromKnee
+        val sideAvg = averageAngle(left, right)
+
+        if (isLikelyFrontPlankOrientation(pose) && midline != null) return midline
+        if (left != null && right != null && abs(left - right) > 32.0 && midline != null) return midline
+
+        if (sideAvg != null) return sideAvg
         val fromAnkle = averageAngle(
             angleForSide(pose, PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_ANKLE),
             angleForSide(pose, PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_ANKLE)
         )
         if (fromAnkle != null) return fromAnkle
-        return torsoHorizontalProxyAngle(pose)
+        return midline ?: torsoHorizontalProxyAngle(pose)
     }
 
     private fun torsoHorizontalProxyAngle(pose: Pose): Double? {
@@ -604,10 +851,11 @@ class PoseRepCounter(
     ): Double? {
         val shoulder = pose.getPoseLandmark(shoulderId) ?: return null
         val hip = pose.getPoseLandmark(hipId) ?: return null
-        if (shoulder.inFrameLikelihood < minConfidence || hip.inFrameLikelihood < minConfidence) return null
+        val cut = landmarkCutoff()
+        if (shoulder.inFrameLikelihood < cut || hip.inFrameLikelihood < cut) return null
 
-        val support = pose.getPoseLandmark(elbowId).takeIf { it != null && it.inFrameLikelihood >= minConfidence }
-            ?: pose.getPoseLandmark(wristId).takeIf { it != null && it.inFrameLikelihood >= minConfidence }
+        val support = pose.getPoseLandmark(elbowId).takeIf { it != null && it.inFrameLikelihood >= cut }
+            ?: pose.getPoseLandmark(wristId).takeIf { it != null && it.inFrameLikelihood >= cut }
             ?: return null
 
         val supportBelowShoulder = support.position.y > shoulder.position.y
@@ -640,10 +888,17 @@ class PoseRepCounter(
     )
 
     companion object {
+        private const val RAPID_REP_CUE_DURATION_MS = 3200L
+        private const val RAPID_VELOCITY_CUE_DURATION_MS = 2200L
+        private const val HIGH_VELOCITY_MIN_FRAMES = 5
+        /** Block turnaround bypass on obvious downward flicker while "at the top". */
+        private const val PUSHUP_TURNAROUND_MIN_VEL = -4.5
+        private const val PUSHUP_NEAR_TOP_FRAMES_REQUIRED = 3
+        /** Frames must exceed soft lockout by this amount to count toward the streak (strict `> up + slop`). */
+        private const val PUSHUP_NEAR_TOP_CLEARANCE_SLOP_DEG = 20.0
         private const val FORM_PROMPT_STABLE_FRAMES = 32
         private const val ELBOW_ASYMMETRY_DEG = 35.0
         private const val LEG_ASYMMETRY_DEG = 35.0
-        private const val CRUNCH_ASYMMETRY_DEG = 30.0
         private const val PLANK_SIDE_ASYMMETRY_DEG = 18.0
         /** Deg/s; sign must match motion toward finish (reduces bounce/noise counts). */
         private const val MIN_SIGNED_COMPLETION_VELOCITY = 4.5
@@ -691,11 +946,6 @@ class PoseRepCounter(
             PoseLandmark.LEFT_KNEE, PoseLandmark.RIGHT_KNEE,
             PoseLandmark.LEFT_ANKLE, PoseLandmark.RIGHT_ANKLE
         )
-        ExerciseType.CRUNCHES -> listOf(
-            PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER,
-            PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP,
-            PoseLandmark.LEFT_KNEE, PoseLandmark.RIGHT_KNEE
-        )
         ExerciseType.PLANK -> listOf(
             PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER,
             PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP
@@ -715,7 +965,7 @@ class PoseRepCounter(
         if (calibrationAngles.size < 45) return
         val min = calibrationAngles.minOrNull() ?: return
         val max = calibrationAngles.maxOrNull() ?: return
-        if (max - min < 18.0) return
+        if (max - min < calibrationMotionMin()) return
         val base = thresholdsFor(exerciseType)
         val adapted = when {
             base.isDownFirst -> base.copy(
@@ -730,6 +980,10 @@ class PoseRepCounter(
         calibratedThresholds = adapted
         profile = CalibrationProfile(minAngle = min, maxAngle = max, updatedAtMs = System.currentTimeMillis())
         profileDirty = true
+    }
+
+    private fun calibrationMotionMin(): Double = when (exerciseType) {
+        else -> 18.0
     }
 
     private fun effectiveThresholds(): Thresholds {

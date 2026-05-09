@@ -1,13 +1,17 @@
 package com.example.visionfit.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.graphics.PointF
 import android.view.Surface
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -100,6 +104,13 @@ fun WorkoutScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    DisposableEffect(Unit) {
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val perRepSeconds = state.exerciseSeconds[exercise] ?: exercise.defaultSecondsPerRep
@@ -201,75 +212,81 @@ fun WorkoutScreen(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
-        analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-            if (!cameraSessionActive) {
-                imageProxy.close()
-                return@setAnalyzer
-            }
-            val mediaImage = imageProxy.image
-            if (mediaImage == null) {
-                imageProxy.close()
-                return@setAnalyzer
-            }
-            val rotation = imageProxy.imageInfo.rotationDegrees
-            val image = InputImage.fromMediaImage(mediaImage, rotation)
-
-            detector.process(image)
-                .addOnSuccessListener { pose ->
-                    val update = repCounter.onPose(pose)
-                    val landmarks = normalizeLandmarks(
-                        pose.allPoseLandmarks,
-                        imageProxy.width,
-                        imageProxy.height,
-                        rotation,
-                        isFrontCamera
-                    )
-                    scope.launch(Dispatchers.Main) {
-                        poseLandmarks = landmarks
-                        poseDetected = update.poseConfident
-                        plankHoldActive = update.holdActive
-                        formPrompt = update.formPrompt
-                        onProgressUpdate(if (exercise == ExerciseType.PLANK) plankHoldSeconds else update.reps)
-                        val profile = update.profileSnapshot
-                        if (!profile.isNullOrBlank() && profile != lastSavedPoseProfile) {
-                            lastSavedPoseProfile = profile
-                            scope.launch(Dispatchers.IO) {
-                                settingsStore.updatePoseProfile(exercise, profile)
-                            }
-                        }
+        analysis.setAnalyzer(
+            analysisExecutor,
+            object : ImageAnalysis.Analyzer {
+                @ExperimentalGetImage
+                override fun analyze(imageProxy: ImageProxy) {
+                    if (!cameraSessionActive) {
+                        imageProxy.close()
+                        return
                     }
+                    val mediaImage = imageProxy.image
+                    if (mediaImage == null) {
+                        imageProxy.close()
+                        return
+                    }
+                    val rotation = imageProxy.imageInfo.rotationDegrees
+                    val image = InputImage.fromMediaImage(mediaImage, rotation)
 
-                    if (exercise != ExerciseType.PLANK) {
-                        val newCount = update.reps
-                        val current = repCountRef.get()
-                        if (newCount != current) {
-                            repCountRef.set(newCount)
-                            val delta = newCount - current
-                            if (delta > 0) {
-                                scope.launch(Dispatchers.Main) {
-                                    settingsStore.addWorkoutCredits(
-                                        exercise = exercise,
-                                        units = delta.toLong(),
-                                        creditsSeconds = delta.toLong() * perRepSeconds.toLong()
-                                    )
+                    detector.process(image)
+                        .addOnSuccessListener { pose ->
+                            val update = repCounter.onPose(pose)
+                            val landmarks = normalizeLandmarks(
+                                pose.allPoseLandmarks,
+                                imageProxy.width,
+                                imageProxy.height,
+                                rotation,
+                                isFrontCamera
+                            )
+                            scope.launch(Dispatchers.Main) {
+                                poseLandmarks = landmarks
+                                poseDetected = update.poseConfident
+                                plankHoldActive = update.holdActive
+                                formPrompt = update.formPrompt
+                                onProgressUpdate(if (exercise == ExerciseType.PLANK) plankHoldSeconds else update.reps)
+                                val profile = update.profileSnapshot
+                                if (!profile.isNullOrBlank() && profile != lastSavedPoseProfile) {
+                                    lastSavedPoseProfile = profile
+                                    scope.launch(Dispatchers.IO) {
+                                        settingsStore.updatePoseProfile(exercise, profile)
+                                    }
                                 }
                             }
-                            scope.launch(Dispatchers.Main) {
-                                repCount = newCount
+
+                            if (exercise != ExerciseType.PLANK) {
+                                val newCount = update.reps
+                                val current = repCountRef.get()
+                                if (newCount != current) {
+                                    repCountRef.set(newCount)
+                                    val delta = newCount - current
+                                    if (delta > 0) {
+                                        scope.launch(Dispatchers.Main) {
+                                            settingsStore.addWorkoutCredits(
+                                                exercise = exercise,
+                                                units = delta.toLong(),
+                                                creditsSeconds = delta.toLong() * perRepSeconds.toLong()
+                                            )
+                                        }
+                                    }
+                                    scope.launch(Dispatchers.Main) {
+                                        repCount = newCount
+                                    }
+                                }
                             }
                         }
-                    }
+                        .addOnFailureListener {
+                            scope.launch(Dispatchers.Main) {
+                                poseDetected = false
+                                plankHoldActive = false
+                                poseLandmarks = emptyMap()
+                                formPrompt = "Keep your full body in frame for form feedback."
+                            }
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
                 }
-                .addOnFailureListener {
-                    scope.launch(Dispatchers.Main) {
-                        poseDetected = false
-                        plankHoldActive = false
-                        poseLandmarks = emptyMap()
-                        formPrompt = "Keep your full body in frame for form feedback."
-                    }
-                }
-                .addOnCompleteListener { imageProxy.close() }
-        }
+            }
+        )
 
         try {
             cameraProvider.unbindAll()

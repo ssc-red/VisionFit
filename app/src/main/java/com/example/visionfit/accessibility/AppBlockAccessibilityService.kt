@@ -1,10 +1,12 @@
 package com.example.visionfit.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import com.example.visionfit.MainActivity
 import com.example.visionfit.data.SettingsStore
 import com.example.visionfit.model.AppBlockMode
 import kotlinx.coroutines.CoroutineScope
@@ -36,9 +38,11 @@ class AppBlockAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         settingsStore = SettingsStore(applicationContext)
-        overlay = BlockingOverlay(this, onExitApp = {
-            performGlobalAction(GLOBAL_ACTION_HOME)
-        })
+        overlay = BlockingOverlay(
+            this,
+            onExitApp = { performGlobalAction(GLOBAL_ACTION_HOME) },
+            onEarnCredits = { openVisionFitHome() }
+        )
         serviceScope.launch {
             settingsStore?.ensureDailyGrantApplied()
             settingsStore?.settingsFlow?.collect { state ->
@@ -204,5 +208,14 @@ class AppBlockAccessibilityService : AccessibilityService() {
         } catch (e: PackageManager.NameNotFoundException) {
             packageName
         }
+    }
+
+    private fun openVisionFitHome() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        startActivity(intent)
     }
 }

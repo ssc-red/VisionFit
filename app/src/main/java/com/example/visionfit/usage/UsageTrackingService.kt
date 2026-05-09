@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.example.visionfit.MainActivity
 import com.example.visionfit.accessibility.BlockingOverlay
 import com.example.visionfit.accessibility.BlockingOverlayWindowType
 import com.example.visionfit.data.SettingsStore
@@ -143,7 +144,8 @@ class UsageTrackingService : Service() {
             if (overlay == null) {
                 overlay = BlockingOverlay(
                     this,
-                    { navigateHome() },
+                    onExitApp = { navigateHome() },
+                    onEarnCredits = { openVisionFitHome() },
                     BlockingOverlayWindowType.APPLICATION
                 )
             }
@@ -157,6 +159,15 @@ class UsageTrackingService : Service() {
         val intent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_HOME)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(intent)
+    }
+
+    private fun openVisionFitHome() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         startActivity(intent)
     }

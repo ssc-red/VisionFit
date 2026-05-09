@@ -64,16 +64,16 @@ class PoseRepCounterTest {
     }
 
     @Test
-    fun crunchRepCountsOnceWithUpFirstMotion() {
-        val counter = PoseRepCounter(ExerciseType.CRUNCHES)
+    fun pullupCountsWithoutFullyStraightArmsInDegrees() {
+        val counter = PoseRepCounter(ExerciseType.PULL_UPS)
         var now = 0L
         fun sample(angle: Double) {
             counter.onAngleSample(angle, poseConfident = true, nowMs = now)
-            now += 120L
+            now += 130L
         }
-        repeat(6) { sample(150.0) }
-        repeat(14) { sample(74.0) }
-        assertEquals(1, counter.onAngleSample(74.0, poseConfident = true, nowMs = now).reps)
+        repeat(5) { sample(132.0) }
+        repeat(12) { sample(68.0) }
+        assertEquals(1, counter.onAngleSample(130.0, poseConfident = true, nowMs = now).reps)
     }
 }
 
