@@ -48,6 +48,22 @@ class PoseRepCounterTest {
     }
 
     @Test
+    fun pushupBoundaryFlickerWithWrongSignVelocityDoesNotCount() {
+        val counter = PoseRepCounter(ExerciseType.PUSHUPS)
+        var now = 0L
+        fun sample(angle: Double) {
+            counter.onAngleSample(angle, poseConfident = true, nowMs = now)
+            now += 120L
+        }
+        repeat(5) { sample(164.0) }
+        repeat(5) { sample(92.0) }
+        sample(164.0)
+        sample(150.0)
+        sample(164.0)
+        assertEquals(0, counter.onAngleSample(164.0, poseConfident = true, nowMs = now).reps)
+    }
+
+    @Test
     fun crunchRepCountsOnceWithUpFirstMotion() {
         val counter = PoseRepCounter(ExerciseType.CRUNCHES)
         var now = 0L

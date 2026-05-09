@@ -72,6 +72,7 @@ import com.example.visionfit.ui.UpdateDialog
 import com.example.visionfit.ui.WorkoutScreen
 import com.example.visionfit.ui.theme.VisionFitTheme
 import com.example.visionfit.util.isAccessibilityServiceEnabled
+import com.example.visionfit.util.isDrawOverlaysGranted
 import com.example.visionfit.util.isUsageAccessGranted
 import com.example.visionfit.util.loadLaunchableApps
 import com.example.visionfit.util.UpdateChecker
@@ -120,6 +121,7 @@ class MainActivity : ComponentActivity() {
                 var isCameraPermissionGranted by remember { mutableStateOf(false) }
                 var isNotificationPermissionGranted by remember { mutableStateOf(true) }
                 var isUsageAccessGrantedState by remember { mutableStateOf(false) }
+                var isDrawOverlaysGrantedState by remember { mutableStateOf(false) }
                 var isAccessibilityEnabled by remember { mutableStateOf(false) }
                 var isExactAlarmGranted by remember { mutableStateOf(true) }
                 var isBatteryOptIgnored by remember { mutableStateOf(true) }
@@ -162,6 +164,17 @@ class MainActivity : ComponentActivity() {
                         val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         context.startActivity(intent)
+                    }
+                }
+                val openDisplayOverOtherAppsSettings = remember {
+                    {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:${context.packageName}")
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                        }
                     }
                 }
                 val openAccessibilitySettings = remember {
@@ -222,6 +235,7 @@ class MainActivity : ComponentActivity() {
                                 true
                             }
                             isUsageAccessGrantedState = isUsageAccessGranted(context)
+                            isDrawOverlaysGrantedState = isDrawOverlaysGranted(context)
                             isAccessibilityEnabled = isAccessibilityServiceEnabled(context, AppBlockAccessibilityService::class.java)
                             
                             isExactAlarmGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -235,8 +249,12 @@ class MainActivity : ComponentActivity() {
                                 true
                             }
 
-                            val intent = Intent(context, UsageTrackingService::class.java)
-                            ContextCompat.startForegroundService(context, intent)
+                            if (!isAccessibilityEnabled) {
+                                val usageIntent = Intent(context, UsageTrackingService::class.java)
+                                ContextCompat.startForegroundService(context, usageIntent)
+                            } else {
+                                context.stopService(Intent(context, UsageTrackingService::class.java))
+                            }
                             
                             scope.launch {
                                 settingsStore.ensureDailyGrantApplied()
@@ -368,6 +386,8 @@ class MainActivity : ComponentActivity() {
                             onAppModeChange = { packageName, mode ->
                                 scope.launch { settingsStore.updateAppMode(packageName, mode) }
                             },
+                            isAccessibilityServiceEnabled = isAccessibilityEnabled,
+                            onOpenAccessibilitySettings = openAccessibilitySettings,
                             modifier = Modifier.padding(innerPadding)
                         )
                         Tab.SETTINGS -> SettingsScreen(
@@ -386,6 +406,8 @@ class MainActivity : ComponentActivity() {
                                 scope.launch { settingsStore.updateGlobalCreditsSeconds(0L) }
                             },
                             isAccessibilityServiceEnabled = isAccessibilityEnabled,
+                            isDrawOverlaysGranted = isDrawOverlaysGrantedState,
+                            onOpenDisplayOverOtherAppsSettings = openDisplayOverOtherAppsSettings,
                             isCameraPermissionGranted = isCameraPermissionGranted,
                             isNotificationPermissionGranted = isNotificationPermissionGranted,
                             isUsageAccessGranted = isUsageAccessGrantedState,

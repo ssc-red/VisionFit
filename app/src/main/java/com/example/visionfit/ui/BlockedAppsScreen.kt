@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -33,6 +34,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +51,7 @@ import androidx.core.graphics.drawable.toBitmap
 import com.example.visionfit.model.AppBlockMode
 import com.example.visionfit.model.AppInfo
 import com.example.visionfit.model.SettingsState
+import com.example.visionfit.util.SuggestedSocialApps
 
 @Composable
 fun BlockedAppsScreen(
@@ -56,29 +59,34 @@ fun BlockedAppsScreen(
     apps: List<AppInfo>,
     onToggleApp: (String, Boolean) -> Unit,
     onAppModeChange: (String, AppBlockMode) -> Unit,
+    isAccessibilityServiceEnabled: Boolean,
+    onOpenAccessibilitySettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    var reelsOnlyNeedsAccessibilityFor by remember { mutableStateOf<String?>(null) }
     val filteredApps = remember(apps, searchQuery, state.appRules) {
+        val comparator =
+            compareByDescending<AppInfo> { state.appRules.containsKey(it.packageName) }
+                .thenBy { SuggestedSocialApps.rank(it.packageName) }
+                .thenBy { it.label.lowercase() }
         if (searchQuery.isBlank()) {
-            apps.sortedWith(
-                compareByDescending<AppInfo> { state.appRules.containsKey(it.packageName) }
-                    .thenBy { it.label.lowercase() }
-            )
+            apps.sortedWith(comparator)
         } else {
             apps.filter {
                 it.label.contains(searchQuery, ignoreCase = true) ||
                     it.packageName.contains(searchQuery, ignoreCase = true)
-            }
+            }.sortedWith(comparator)
         }
     }
     val blockedCount = state.appRules.size
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         item {
             Column {
                 Text(
@@ -125,10 +133,51 @@ fun BlockedAppsScreen(
                 currentMode = currentMode,
                 supportsReelsOnly = supportsReelsOnly,
                 onToggle = { onToggleApp(app.packageName, it) },
-                onModeChange = { onAppModeChange(app.packageName, it) }
+                onModeChange = { mode ->
+                    if (
+                        mode == AppBlockMode.REELS_ONLY &&
+                        supportsReelsOnly &&
+                        !isAccessibilityServiceEnabled
+                    ) {
+                        reelsOnlyNeedsAccessibilityFor = app.packageName
+                    } else {
+                        onAppModeChange(app.packageName, mode)
+                    }
+                }
             )
         }
         item { Spacer(modifier = Modifier.height(8.dp)) }
+        }
+
+        reelsOnlyNeedsAccessibilityFor?.let { packageName ->
+            val label = apps.firstOrNull { it.packageName == packageName }?.label ?: packageName
+            AlertDialog(
+                onDismissRequest = { reelsOnlyNeedsAccessibilityFor = null },
+                title = { Text("Accessibility required") },
+                text = {
+                    Text(
+                        "Reels-only uses Accessibility to detect Reels inside $label. " +
+                            "Without it, this mode does not work. Open Accessibility settings to enable VisionFit?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onAppModeChange(packageName, AppBlockMode.REELS_ONLY)
+                            onOpenAccessibilitySettings()
+                            reelsOnlyNeedsAccessibilityFor = null
+                        }
+                    ) {
+                        Text("Open settings")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { reelsOnlyNeedsAccessibilityFor = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
     }
 }
 

@@ -17,13 +17,14 @@ class PoseRepCounter(
     private var smoothedAngle: Double? = null
     private val smoothingFactor = 0.25
     private var framesInState = 0
-    private val requiredFrames = 3
+    private val requiredFrames = 4
     private val recentRaw = ArrayDeque<Double>(3)
 
     private var lastRepTime = Long.MIN_VALUE / 2
-    private val repCooldownMs = 350L
+    private val repCooldownMs = 450L
     private var stageEnteredAtMs = 0L
     private var stageEntryAngle: Double? = null
+    private var stageEntryRaw: Double? = null
     private var stageExtremeAngle: Double? = null
     private var stageExtremeRaw: Double? = null
     private val hysteresisMargin = 8.0
@@ -504,15 +505,23 @@ class PoseRepCounter(
         if (nowMs - lastRepTime <= repCooldownMs) return false
         if (framesInState < requiredFrames) return false
         if (nowMs - stageEnteredAtMs < thresholds.minStageDurationMs) return false
-        if (!latestPoseWasSynthetic && abs(latestAngularVelocity) < MIN_DIRECTION_REVERSAL_VELOCITY) return false
 
-        val entry = stageEntryAngle ?: return false
+        val entryRaw = stageEntryRaw ?: return false
         val extremeRaw = stageExtremeRaw ?: return false
         val span = if (thresholds.isDownFirst) {
-            extremeRaw - entry
+            extremeRaw - entryRaw
         } else {
-            entry - extremeRaw
+            entryRaw - extremeRaw
         }
+
+        val completionVelocityOk = if (thresholds.isDownFirst) {
+            latestAngularVelocity >= MIN_SIGNED_COMPLETION_VELOCITY
+        } else {
+            latestAngularVelocity <= -MIN_SIGNED_COMPLETION_VELOCITY
+        }
+        val slowDeepRep = span >= thresholds.minRepSpan + SLOW_REP_SPAN_SLOP &&
+            framesInState >= SLOW_REP_MIN_FRAMES
+        if (!latestPoseWasSynthetic && !completionVelocityOk && !slowDeepRep) return false
 
         return span >= thresholds.minRepSpan && when {
             thresholds.isDownFirst -> angle >= thresholds.up
@@ -525,6 +534,7 @@ class PoseRepCounter(
         framesInState = 1
         stageEnteredAtMs = nowMs
         stageEntryAngle = angle
+        stageEntryRaw = despiked
         stageExtremeAngle = angle
         stageExtremeRaw = despiked
     }
@@ -635,7 +645,11 @@ class PoseRepCounter(
         private const val LEG_ASYMMETRY_DEG = 35.0
         private const val CRUNCH_ASYMMETRY_DEG = 30.0
         private const val PLANK_SIDE_ASYMMETRY_DEG = 18.0
-        private const val MIN_DIRECTION_REVERSAL_VELOCITY = 6.0
+        /** Deg/s; sign must match motion toward finish (reduces bounce/noise counts). */
+        private const val MIN_SIGNED_COMPLETION_VELOCITY = 4.5
+        /** Extra degrees beyond [Thresholds.minRepSpan] to accept slow reps with damped velocity. */
+        private const val SLOW_REP_SPAN_SLOP = 10.0
+        private const val SLOW_REP_MIN_FRAMES = 6
     }
 
     private fun updateVelocity(angle: Double, nowMs: Long) {

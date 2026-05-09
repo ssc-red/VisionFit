@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import android.util.Log
 import androidx.core.content.FileProvider
 import com.example.visionfit.model.GitHubRelease
 import kotlinx.coroutines.Dispatchers
@@ -57,14 +59,16 @@ object UpdateChecker {
             try {
                 val fileName = "VisionFit-${release.versionName}.apk"
                 val downloadsDir = File(context.cacheDir, "updates")
-                downloadsDir.mkdirs()
+                if (!downloadsDir.exists()) downloadsDir.mkdirs()
                 val outputFile = File(downloadsDir, fileName)
-                // Clean old files
+                
+                // Clean old files in updates directory
                 downloadsDir.listFiles()?.forEach { it.delete() }
 
                 val connection = URL(url).openConnection() as HttpURLConnection
                 connection.connectTimeout = DOWNLOAD_TIMEOUT_MS
                 connection.readTimeout = DOWNLOAD_TIMEOUT_MS
+                connection.instanceFollowRedirects = true
                 connection.connect()
 
                 val contentLength = connection.contentLength
@@ -83,6 +87,7 @@ object UpdateChecker {
                     }
                 }
 
+                outputStream.flush()
                 outputStream.close()
                 inputStream.close()
                 connection.disconnect()
@@ -94,23 +99,63 @@ object UpdateChecker {
         }
     }
 
-    fun installApk(context: Context, apkFile: File): Boolean {
+    /**
+     * Returns an error string, or null on success.
+     */
+    fun installApk(context: Context, apkFile: File): String? {
         return try {
+            if (!apkFile.exists() || apkFile.length() == 0L) {
+                return "Downloaded file not found or empty"
+            }
+
             val uri: Uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 apkFile
             )
 
-            val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                data = uri
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
-                putExtra(Intent.EXTRA_RETURN_RESULT, true)
+            // Try ACTION_VIEW first (works reliably on Android 10+ for package installer)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                // On Android 12+, ClipData is needed for URI permission grant
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    clipData = android.content.ClipData.newRawUri("", uri)
+                }
             }
+
             context.startActivity(intent)
-            true
-        } catch (e: Exception) {
-            false
+            null // success
+        } catch (e: android.content.ActivityNotFoundException) {
+            Log.e("UpdateChecker", "No activity for ACTION_VIEW", e)
+            // Fallback: try ACTION_INSTALL_PACKAGE
+            try {
+                @Suppress("DEPRECATION")
+                val fallbackIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                    data = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        apkFile
+                    )
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val chooser = Intent.createChooser(fallbackIntent, "Install VisionFit update")
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(chooser)
+                null // success via fallback
+            } catch (e2: Exception) {
+                Log.e("UpdateChecker", "Install failed (both methods)", e2)
+                when {
+                    e2 is SecurityException ->
+                        "Install permission denied. Enable 'Install unknown apps' for VisionFit in Settings"
+                    else -> "Could not launch package installer: ${e2.localizedMessage ?: "Unknown error"}"
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.e("UpdateChecker", "SecurityException on ACTION_VIEW", e)
+            "Install permission denied. Enable 'Install unknown apps' for VisionFit in Settings > Special app access"
         }
     }
 

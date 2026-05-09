@@ -7,12 +7,16 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.example.visionfit.accessibility.BlockingOverlay
+import com.example.visionfit.accessibility.BlockingOverlayWindowType
 import com.example.visionfit.data.SettingsStore
 import com.example.visionfit.model.AppBlockMode
+import com.example.visionfit.util.isDrawOverlaysGranted
 import com.example.visionfit.util.isUsageAccessGranted
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +31,12 @@ private const val CREDIT_CONSUME_INTERVAL_MS = 1000L
 private const val NOTIFICATION_CHANNEL_ID = "visionfit_credits"
 private const val NOTIFICATION_ID = 1001
 
+/**
+ * Runs when the Accessibility blocking service is **disabled**: consumes credits for ALL-mode
+ * apps via Usage Stats, and shows a fallback block overlay (requires "Display over other apps")
+ * when credits reach zero. When Accessibility is enabled, [MainActivity] does not start this
+ * service — blocking and credit burn are handled entirely by [com.example.visionfit.accessibility.AppBlockAccessibilityService].
+ */
 class UsageTrackingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val usageStatsManager by lazy {
@@ -40,6 +50,7 @@ class UsageTrackingService : Service() {
     private var settingsJob: Job? = null
     private var notificationManager: NotificationManager? = null
     private var isForeground = false
+    private var overlay: BlockingOverlay? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -61,6 +72,8 @@ class UsageTrackingService : Service() {
     override fun onDestroy() {
         pollingJob?.cancel()
         settingsJob?.cancel()
+        overlay?.hide()
+        overlay = null
         cancelForegroundNotification()
         serviceScope.cancel()
         super.onDestroy()
@@ -74,7 +87,8 @@ class UsageTrackingService : Service() {
             settingsStore?.settingsFlow?.collect { state ->
                 appRules = state.appRules
                 currentCreditsSeconds = state.globalCreditsSeconds
-                if (currentCreditsSeconds <= 0L) {
+                if (currentCreditsSeconds <= 0L && appRules.isEmpty()) {
+                    overlay?.hide()
                     cancelForegroundNotification()
                     stopSelf()
                 } else {
@@ -88,40 +102,72 @@ class UsageTrackingService : Service() {
         if (pollingJob?.isActive == true) return
         pollingJob = serviceScope.launch {
             while (isActive) {
+                delay(CREDIT_CONSUME_INTERVAL_MS)
                 if (!isUsageAccessGranted(this@UsageTrackingService)) {
-                    delay(CREDIT_CONSUME_INTERVAL_MS)
+                    overlay?.hide()
                     continue
                 }
-                if (currentCreditsSeconds <= 0L) {
-                    delay(CREDIT_CONSUME_INTERVAL_MS)
-                    continue
-                }
+
                 val packageName = resolveForegroundPackage()
                 lastPackageName = packageName
                 val mode = packageName?.let { appRules[it] }
-                val shouldConsume = mode == AppBlockMode.ALL
-                if (shouldConsume) {
-                    consumeCredits(1L)
-                } else {
-                    updateCreditsNotification()
+
+                val store = settingsStore
+                if (mode == AppBlockMode.ALL && currentCreditsSeconds > 0 && store != null) {
+                    currentCreditsSeconds = store.consumeCreditsSeconds(1L)
                 }
-                delay(CREDIT_CONSUME_INTERVAL_MS)
+
+                applyFallbackBlocking(packageName, mode)
+                updateCreditsNotification()
             }
         }
     }
 
-    private fun consumeCredits(seconds: Long) {
-        if (seconds <= 0L) return
-        val store = settingsStore ?: return
-        serviceScope.launch {
-            val remaining = store.consumeCreditsSeconds(seconds)
-            currentCreditsSeconds = remaining
-            if (remaining <= 0L) {
-                cancelForegroundNotification()
-                stopSelf()
-            } else {
-                updateCreditsNotification()
+    private fun applyFallbackBlocking(packageName: String?, mode: AppBlockMode?) {
+        if (packageName == this.packageName) {
+            overlay?.hide()
+            return
+        }
+        if (!isDrawOverlaysGranted(this)) {
+            overlay?.hide()
+            return
+        }
+        if (mode == null) {
+            overlay?.hide()
+            return
+        }
+
+        val hasCredits = currentCreditsSeconds > 0L
+        val shouldBlock = !hasCredits
+        if (shouldBlock && packageName != null) {
+            if (overlay == null) {
+                overlay = BlockingOverlay(
+                    this,
+                    { navigateHome() },
+                    BlockingOverlayWindowType.APPLICATION
+                )
             }
+            overlay?.show(resolveAppLabel(packageName), mode)
+        } else {
+            overlay?.hide()
+        }
+    }
+
+    private fun navigateHome() {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(intent)
+    }
+
+    private fun resolveAppLabel(packageName: String): String {
+        val pm = packageManager
+        return try {
+            val info = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(info)?.toString().orEmpty().ifBlank { packageName }
+        } catch (_: PackageManager.NameNotFoundException) {
+            packageName
         }
     }
 
@@ -141,10 +187,9 @@ class UsageTrackingService : Service() {
     }
 
     private fun updateCreditsNotification() {
-        val detail = if (lastPackageName != null) {
-            "Using credits on ${lastPackageName}"
-        } else {
-            "Credits available"
+        val detail = when {
+            lastPackageName != null -> "Using credits on ${lastPackageName}"
+            else -> "Credits available"
         }
         ensureForeground(detail)
         notificationManager?.notify(NOTIFICATION_ID, buildNotification(detail))

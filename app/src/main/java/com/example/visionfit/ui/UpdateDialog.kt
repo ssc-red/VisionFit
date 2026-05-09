@@ -173,11 +173,12 @@ fun UpdateDialog(
                     Button(
                         onClick = {
                             downloadedFile?.let { file ->
-                                if (UpdateChecker.installApk(context, file)) {
+                                val error = UpdateChecker.installApk(context, file)
+                                if (error == null) {
                                     onDismiss()
                                 } else {
                                     dialogState = UpdateDialogState.FAILED
-                                    errorMessage = "Could not launch installer"
+                                    errorMessage = error
                                 }
                             }
                         }

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Event
 import androidx.compose.material.icons.rounded.FitnessCenter
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SettingsBackupRestore
@@ -69,6 +70,8 @@ fun SettingsScreen(
     onOpenAccessibilitySettings: () -> Unit,
     onResetCredits: () -> Unit,
     isAccessibilityServiceEnabled: Boolean,
+    isDrawOverlaysGranted: Boolean,
+    onOpenDisplayOverOtherAppsSettings: () -> Unit,
     isCameraPermissionGranted: Boolean,
     isNotificationPermissionGranted: Boolean,
     isUsageAccessGranted: Boolean,
@@ -145,7 +148,7 @@ fun SettingsScreen(
         item {
             PermissionRow(
                 title = "Usage access",
-                subtitle = "Detect when blocked apps are open",
+                subtitle = "Detect foreground apps and burn credits (required without Accessibility)",
                 icon = Icons.Rounded.Visibility,
                 granted = isUsageAccessGranted,
                 actionLabel = if (isUsageAccessGranted) "Granted" else "Open",
@@ -154,8 +157,18 @@ fun SettingsScreen(
         }
         item {
             PermissionRow(
+                title = "Display over other apps",
+                subtitle = "Show block overlay without Accessibility (grant Usage access too)",
+                icon = Icons.Rounded.Layers,
+                granted = isDrawOverlaysGranted,
+                actionLabel = if (isDrawOverlaysGranted) "Granted" else "Open",
+                onAction = onOpenDisplayOverOtherAppsSettings
+            )
+        }
+        item {
+            PermissionRow(
                 title = "Accessibility service",
-                subtitle = "Power the blocking overlay",
+                subtitle = "Best experience: Reels-only mode and reliable blocking",
                 icon = Icons.Rounded.Accessibility,
                 granted = isAccessibilityServiceEnabled,
                 actionLabel = if (isAccessibilityServiceEnabled) "Enabled" else "Open",

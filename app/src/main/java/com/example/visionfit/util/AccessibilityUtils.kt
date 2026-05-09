@@ -2,7 +2,12 @@ package com.example.visionfit.util
 
 import android.content.ComponentName
 import android.content.Context
+import android.os.Build
 import android.provider.Settings
+
+fun isDrawOverlaysGranted(context: Context): Boolean {
+    return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+}
 
 fun isAccessibilityServiceEnabled(context: Context, serviceClass: Class<*>): Boolean {
     val enabled = Settings.Secure.getInt(

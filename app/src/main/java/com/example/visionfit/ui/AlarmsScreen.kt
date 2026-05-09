@@ -1037,7 +1037,7 @@ private fun EditorSwitchRow(
                 subtitle,
                 style = MaterialTheme.typography.titleMedium,
                 color = AlarmMuted,
-                maxLines = 1,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
         }

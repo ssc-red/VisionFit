@@ -16,7 +16,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 
-private const val REELS_GRACE_PERIOD_MS = 1500L
+/** Stay in "Reels active" briefly after the last reels signal so quick UI churn does not drop the block. */
+private const val REELS_GRACE_PERIOD_MS = 5500L
 private const val CREDIT_CONSUME_INTERVAL_MS = 1000L
 private const val REELS_LOG_TAG = "VisionFitReels"
 
@@ -35,7 +36,9 @@ class AppBlockAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         settingsStore = SettingsStore(applicationContext)
-        overlay = BlockingOverlay(this) { performGlobalAction(GLOBAL_ACTION_HOME) }
+        overlay = BlockingOverlay(this, onExitApp = {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        })
         serviceScope.launch {
             settingsStore?.ensureDailyGrantApplied()
             settingsStore?.settingsFlow?.collect { state ->
@@ -83,33 +86,57 @@ class AppBlockAccessibilityService : AccessibilityService() {
         val className = event.className?.toString()?.lowercase().orEmpty()
         val source = event.source
         val viewId = source?.viewIdResourceName?.lowercase().orEmpty()
-        source?.recycle()
+        val contentDesc = source?.contentDescription?.toString()?.lowercase().orEmpty()
+        try {
+            val viewerClassTokens = listOf(
+                "reelviewer",
+                "reelsviewer",
+                "clipsviewer",
+                "clipsfragment",
+                "reelsfragment",
+                "shortswatchactivity",
+                "shortsplayer",
+                "reelfeed",
+                "reels_viewer",
+                "clips_viewer",
+                "clips_profile",
+                "reel_share",
+                "reels_tray",
+                "swipe_refresh_reels",
+                "clips_viewer_delegate",
+                "reelsviewerfragment",
+                "igds_media_player",
+                "clips_media_component"
+            )
+            val viewerIdTokens = listOf(
+                "reels_viewer",
+                "reel_viewer",
+                "clips_viewer",
+                "reels_tray_viewer",
+                "shorts_player",
+                "shorts_container",
+                "reels_tab_root",
+                "reels_home",
+                "reels_bottom_sheet",
+                "reels_swipe",
+                "clips_netego",
+                "clips_video",
+                "reels_preview",
+                "reels_fragment",
+                "reels_carousel",
+                "clips_profile",
+                "feed_timeline_reels"
+            )
 
-        val viewerClassTokens = listOf(
-            "reelviewer",
-            "reelsviewer",
-            "clipsviewer",
-            "shortswatchactivity",
-            "shortsplayer",
-            "reelfeed",
-            "reels_viewer",
-            "clips_viewer"
-        )
-        val viewerIdTokens = listOf(
-            "reels_viewer",
-            "reel_viewer",
-            "clips_viewer",
-            "reels_tray_viewer",
-            "shorts_player",
-            "shorts_container",
-            "reels_tab_root"
-        )
+            val classMatches = viewerClassTokens.any { className.contains(it) }
+            val idMatches = viewerIdTokens.any { viewId.contains(it) }
+            val descMatches = contentDesc.contains("reels viewer")
 
-        val classMatches = viewerClassTokens.any { className.contains(it) }
-        val idMatches = viewerIdTokens.any { viewId.contains(it) }
-
-        Log.d(REELS_LOG_TAG, "class=$className viewId=$viewId classMatches=$classMatches idMatches=$idMatches")
-        return classMatches || idMatches
+            Log.d(REELS_LOG_TAG, "class=$className viewId=$viewId desc=${contentDesc.take(48)} classMatches=$classMatches idMatches=$idMatches descMatches=$descMatches")
+            return classMatches || idMatches || descMatches
+        } finally {
+            source?.recycle()
+        }
     }
 
     private fun applyBlockingState(
