@@ -249,6 +249,11 @@ class MainActivity : ComponentActivity() {
                                 true
                             }
 
+                            // When accessibility is off, run the Usage Stats fallback so credit
+                            // tracking + notifications still work. UsageTrackingService keeps a
+                            // silent MIN-importance "tracker" notification while running and
+                            // posts a separate visible notification only while actively
+                            // consuming credits — same UX as accessibility mode.
                             if (!isAccessibilityEnabled) {
                                 val usageIntent = Intent(context, UsageTrackingService::class.java)
                                 ContextCompat.startForegroundService(context, usageIntent)

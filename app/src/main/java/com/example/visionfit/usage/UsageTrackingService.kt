@@ -13,10 +13,12 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.visionfit.MainActivity
+import com.example.visionfit.accessibility.AppBlockAccessibilityService
 import com.example.visionfit.accessibility.BlockingOverlay
 import com.example.visionfit.accessibility.BlockingOverlayWindowType
 import com.example.visionfit.data.SettingsStore
 import com.example.visionfit.model.AppBlockMode
+import com.example.visionfit.util.isAccessibilityServiceEnabled
 import com.example.visionfit.util.isDrawOverlaysGranted
 import com.example.visionfit.util.isUsageAccessGranted
 import kotlinx.coroutines.CoroutineScope
@@ -29,8 +31,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val CREDIT_CONSUME_INTERVAL_MS = 1000L
-private const val NOTIFICATION_CHANNEL_ID = "visionfit_credits"
-private const val NOTIFICATION_ID = 1001
+/** Usage events older than this are ignored; [lastResolvedForegroundPackage] covers longer sessions. */
+private const val USAGE_EVENTS_LOOKBACK_MS = 120_000L
 
 /**
  * Runs when the Accessibility blocking service is **disabled**: consumes credits for ALL-mode
@@ -52,16 +54,22 @@ class UsageTrackingService : Service() {
     private var notificationManager: NotificationManager? = null
     private var isForeground = false
     private var overlay: BlockingOverlay? = null
+    /** Last known foreground from usage events — survives gaps with no events in [USAGE_EVENTS_LOOKBACK_MS]. */
+    private var lastResolvedForegroundPackage: String? = null
 
     override fun onCreate() {
         super.onCreate()
         settingsStore = SettingsStore(applicationContext)
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        createNotificationChannel()
+        createNotificationChannelIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ensureForeground("Credits available")
+        // Required by Android: a service started with startForegroundService() must call
+        // startForeground within a few seconds. We post a silent MIN-importance tracker
+        // notification (no status-bar icon) — the *visible* "spending credits" notification
+        // is posted separately and only while we're actually consuming credits.
+        ensureTrackerForeground()
         serviceScope.launch {
             settingsStore?.ensureDailyGrantApplied()
         }
@@ -75,7 +83,8 @@ class UsageTrackingService : Service() {
         settingsJob?.cancel()
         overlay?.hide()
         overlay = null
-        cancelForegroundNotification()
+        clearActiveCreditNotification()
+        stopTrackerForeground()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -90,10 +99,9 @@ class UsageTrackingService : Service() {
                 currentCreditsSeconds = state.globalCreditsSeconds
                 if (currentCreditsSeconds <= 0L && appRules.isEmpty()) {
                     overlay?.hide()
-                    cancelForegroundNotification()
+                    clearActiveCreditNotification()
+                    stopTrackerForeground()
                     stopSelf()
-                } else {
-                    updateCreditsNotification()
                 }
             }
         }
@@ -104,8 +112,22 @@ class UsageTrackingService : Service() {
         pollingJob = serviceScope.launch {
             while (isActive) {
                 delay(CREDIT_CONSUME_INTERVAL_MS)
+                // If Accessibility is enabled, that service owns blocking + consumption.
+                // Self-stop so we don't post a competing notification.
+                if (isAccessibilityServiceEnabled(
+                        this@UsageTrackingService,
+                        AppBlockAccessibilityService::class.java
+                    )
+                ) {
+                    overlay?.hide()
+                    clearActiveCreditNotification()
+                    stopTrackerForeground()
+                    stopSelf()
+                    return@launch
+                }
                 if (!isUsageAccessGranted(this@UsageTrackingService)) {
                     overlay?.hide()
+                    clearActiveCreditNotification()
                     continue
                 }
 
@@ -114,12 +136,22 @@ class UsageTrackingService : Service() {
                 val mode = packageName?.let { appRules[it] }
 
                 val store = settingsStore
-                if (mode == AppBlockMode.ALL && currentCreditsSeconds > 0 && store != null) {
+                var didConsume = false
+                // Drain credits whenever the foreground is a tracked app, regardless of mode.
+                if (mode != null && currentCreditsSeconds > 0 && store != null) {
                     currentCreditsSeconds = store.consumeCreditsSeconds(1L)
+                    didConsume = true
                 }
 
                 applyFallbackBlocking(packageName, mode)
-                updateCreditsNotification()
+                // Visible "spending credits" notification matches the accessibility-mode
+                // behavior: only posted while credits are actively being consumed in a
+                // tracked app, cleared the moment that stops.
+                if (didConsume && packageName != null) {
+                    postActiveCreditNotification(packageName)
+                } else {
+                    clearActiveCreditNotification()
+                }
             }
         }
     }
@@ -134,6 +166,13 @@ class UsageTrackingService : Service() {
             return
         }
         if (mode == null) {
+            overlay?.hide()
+            return
+        }
+        // Without Accessibility we cannot detect the Reels viewer specifically; fall back
+        // to "block all screens" only for ALL-mode apps. REELS_ONLY drains credits but
+        // does not block in usage-stats fallback mode.
+        if (mode == AppBlockMode.REELS_ONLY) {
             overlay?.hide()
             return
         }
@@ -184,7 +223,7 @@ class UsageTrackingService : Service() {
 
     private fun resolveForegroundPackage(): String? {
         val endTime = System.currentTimeMillis()
-        val startTime = endTime - 10_000
+        val startTime = endTime - USAGE_EVENTS_LOOKBACK_MS
         val events = usageStatsManager.queryEvents(startTime, endTime)
         var lastPackage: String? = null
         val event = UsageEvents.Event()
@@ -194,31 +233,53 @@ class UsageTrackingService : Service() {
                 lastPackage = event.packageName
             }
         }
-        return lastPackage
-    }
-
-    private fun updateCreditsNotification() {
-        val detail = when {
-            lastPackageName != null -> "Using credits on ${lastPackageName}"
-            else -> "Credits available"
+        if (lastPackage != null) {
+            lastResolvedForegroundPackage = lastPackage
+            return lastPackage
         }
-        ensureForeground(detail)
-        notificationManager?.notify(NOTIFICATION_ID, buildNotification(detail))
+        return lastResolvedForegroundPackage
     }
 
-    private fun ensureForeground(detail: String) {
-        if (!isForeground) {
-            val notification = buildNotification(detail)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-            isForeground = true
+    /**
+     * Posts the visible "spending credits" notification on the LOW-importance credits
+     * channel. Matches the accessibility-mode behavior — appears only while the user is
+     * actively burning credits in a tracked app, dismissed the moment that stops.
+     */
+    private fun postActiveCreditNotification(packageName: String) {
+        val notif = NotificationCompat.Builder(this, CREDIT_USAGE_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("Credits left: ${formatSeconds(currentCreditsSeconds)}")
+            .setContentText("Using credits on ${resolveAppLabel(packageName)}")
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOnlyAlertOnce(true)
+            .build()
+        notificationManager?.notify(CREDIT_USAGE_NOTIFICATION_ID, notif)
+    }
+
+    private fun clearActiveCreditNotification() {
+        notificationManager?.cancel(CREDIT_USAGE_NOTIFICATION_ID)
+    }
+
+    /**
+     * Posts the foreground-service tracker notification on the MIN-importance tracker
+     * channel and promotes the service to foreground. The notification is required by
+     * Android for the service to keep running but is invisible in the status bar (MIN
+     * importance) — only the active credit notification creates a status-bar icon.
+     */
+    private fun ensureTrackerForeground() {
+        if (isForeground) return
+        val notification = buildTrackerNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(USAGE_TRACKER_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(USAGE_TRACKER_NOTIFICATION_ID, notification)
         }
+        isForeground = true
     }
 
-    private fun cancelForegroundNotification() {
+    private fun stopTrackerForeground() {
         if (isForeground) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -228,29 +289,39 @@ class UsageTrackingService : Service() {
             }
             isForeground = false
         }
-        notificationManager?.cancel(NOTIFICATION_ID)
+        notificationManager?.cancel(USAGE_TRACKER_NOTIFICATION_ID)
     }
 
-    private fun buildNotification(detail: String) = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-        .setContentTitle("Credits left: ${formatSeconds(currentCreditsSeconds)}")
-        .setContentText(detail)
+    private fun buildTrackerNotification() = NotificationCompat.Builder(this, USAGE_TRACKER_NOTIFICATION_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.ic_menu_view)
+        .setContentTitle("Vision Fit credit tracker")
+        .setContentText("Watching for blocked apps")
         .setOngoing(true)
         .setAutoCancel(false)
+        .setPriority(NotificationCompat.PRIORITY_MIN)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setOnlyAlertOnce(true)
         .build()
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannelIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            NOTIFICATION_CHANNEL_ID,
+        val nm = notificationManager ?: return
+        val creditsChannel = NotificationChannel(
+            CREDIT_USAGE_NOTIFICATION_CHANNEL_ID,
             "Vision Fit credits",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Shows remaining time credits while using blocked apps."
         }
-        notificationManager?.createNotificationChannel(channel)
+        nm.createNotificationChannel(creditsChannel)
+        val trackerChannel = NotificationChannel(
+            USAGE_TRACKER_NOTIFICATION_CHANNEL_ID,
+            "Vision Fit tracker",
+            NotificationManager.IMPORTANCE_MIN
+        ).apply {
+            description = "Background credit tracker (no status-bar icon)."
+        }
+        nm.createNotificationChannel(trackerChannel)
     }
 
     private fun formatSeconds(totalSeconds: Long): String {
